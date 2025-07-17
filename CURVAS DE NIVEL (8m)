@@ -1,0 +1,49 @@
+// 1. Obtener el polígono dibujado
+var drawingTools = Map.drawingTools();
+var geometria = drawingTools.layers().get(0).getEeObject();
+var Ghiglione = ee.FeatureCollection(ee.Feature(geometria));
+Map.centerObject(Ghiglione, 13);
+
+// 2. Cargar DEM SRTM y recortar al polígono
+var dem = ee.Image('USGS/SRTMGL1_003').clip(Ghiglione);
+
+// 3. Generar curvas de nivel con intervalo de 8 metros
+var intervalo = 8;
+var curvas = dem
+  .divide(intervalo)
+  .floor()
+  .multiply(intervalo)
+  .toInt()
+  .rename('elev');
+
+var curvas2b = curvas.addBands(curvas);
+
+var contornos = curvas2b.reduceToVectors({
+  geometry: Ghiglione.geometry(),
+  scale: 30,
+  geometryType: 'polygon',
+  eightConnected: false,
+  labelProperty: 'elev',
+  reducer: ee.Reducer.first()
+});
+
+// 4. Mostrar curvas en azul (relleno transparente)
+Map.addLayer(contornos.style({
+  color: 'blue',
+  fillColor: '00000000',
+  width: 1
+}), {}, 'Curvas de nivel (cada 8m)');
+
+// 5. Mostrar elevación mínima y máxima en consola
+var elevMin = contornos.aggregate_min('elev');
+var elevMax = contornos.aggregate_max('elev');
+print('🔽 Elevación mínima (m):', elevMin);
+print('🔼 Elevación máxima (m):', elevMax);
+
+// 6. Exportar a Google Drive como shapefile
+Export.table.toDrive({
+  collection: contornos,
+  description: 'Curvas_de_Nivel_Ghiglione_8m',
+  folder: 'GEE_exports',
+  fileFormat: 'SHP'
+});
