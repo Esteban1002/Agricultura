@@ -1,0 +1,38 @@
+// 1. Obtener el polígono dibujado
+var drawingTools = Map.drawingTools();
+var geometria = drawingTools.layers().get(0).getEeObject();
+var Ghiglione = ee.FeatureCollection(ee.Feature(geometria));
+Map.centerObject(Ghiglione, 13);
+
+// 2. Cargar DEM y recortar
+var dem = ee.Image('USGS/SRTMGL1_003').clip(Ghiglione);
+
+// 3. Generar curvas de nivel simples
+var intervalo = 10;
+var curvas = dem
+  .divide(intervalo)
+  .floor()
+  .multiply(intervalo)
+  .toInt()
+  .rename('elev');
+var curvas2b = curvas.addBands(curvas);
+
+var contornos = curvas2b.reduceToVectors({
+  geometry: Ghiglione.geometry(),
+  scale: 30,
+  geometryType: 'polygon',
+  eightConnected: false,
+  labelProperty: 'elev',
+  reducer: ee.Reducer.first()
+});
+
+// 4. Mostrar curvas en un solo color para comprobar
+Map.addLayer(contornos.style({color: 'blue', fillColor: '00000000', width: 1}), {}, 'Curvas nivel simples');
+
+// 5. Exportar shapefile para usar en QGIS
+Export.table.toDrive({
+  collection: contornos,
+  description: 'Curvas_de_Nivel_Ghiglione',
+  folder: 'GEE_exports',
+  fileFormat: 'SHP'
+});
