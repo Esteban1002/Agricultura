@@ -1,0 +1,176 @@
+// --------------------------------------
+// 1. Nombre del lote (personalizable)
+// --------------------------------------
+var lote = Lucho_2;  // geometría dibujada
+var nombreLote = 'Lucho 2';
+
+// --------------------------------------
+// 2. Filtrar imágenes Sentinel-2
+// --------------------------------------
+var fechaInicio = '2025-02-01';
+var fechaFin = '2025-02-20';
+
+var s2 = ee.ImageCollection("COPERNICUS/S2")
+  .filterBounds(lote)
+  .filterDate(fechaInicio, fechaFin)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20));
+
+// --------------------------------------
+// 3. Seleccionar la imagen con menos nubes
+// --------------------------------------
+var imagenSeleccionada = ee.Image(
+  s2.sort('CLOUDY_PIXEL_PERCENTAGE').first()
+);
+
+// Obtener fecha de adquisición como string
+var fechaImagen = ee.Date(imagenSeleccionada.get('system:time_start')).format('YYYY-MM-dd');
+
+// --------------------------------------
+// 4. Calcular NDVI
+// --------------------------------------
+var ndvi = imagenSeleccionada.normalizedDifference(['B8', 'B4']).rename('NDVI');
+
+// --------------------------------------
+// 5. Visualización
+// --------------------------------------
+Map.centerObject(lote, 15);
+
+// RGB (True Color)
+var visRGB = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000
+};
+
+// NDVI con paleta estilo imagen
+var visNDVI = {
+  min: 0,
+  max: 1,
+  palette: ['ff0000', 'ff6600', 'ffff00', 'a8e05f', '4c9b1d', '006400']
+};
+
+// Capa RGB
+Map.addLayer(imagenSeleccionada.clip(lote), visRGB, 'Imagen RGB - ' + fechaImagen.getInfo());
+
+// Capa NDVI
+Map.addLayer(ndvi.clip(lote), visNDVI, 'NDVI - ' + fechaImagen.getInfo());
+
+// --------------------------------------
+// 6. Leyenda
+// --------------------------------------
+var leyenda = ui.Panel({
+  style: {
+    position: 'bottom-left',
+    padding: '8px 15px'
+  }
+});
+
+var titulo = ui.Label('NDVI', {
+  fontWeight: 'bold',
+  fontSize: '18px',
+  margin: '0 0 6px 0',
+  padding: '0'
+});
+
+leyenda.add(titulo);
+
+var paleta = visNDVI.palette;
+var valores = ['0.0', '0.2', '0.4', '0.6', '0.8', '1.0'];
+
+for (var i = 0; i < paleta.length; i++) {
+  var colorBox = ui.Label('', {
+    backgroundColor: '#' + paleta[i],
+    padding: '8px',
+    margin: '0 4px 0 0'
+  });
+
+  var etiqueta = ui.Label(valores[i], { margin: '0 0 4px 0' });
+
+  var fila = ui.Panel({
+    widgets: [colorBox, etiqueta],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+
+  leyenda.add(fila);
+}
+
+Map.add(leyenda);
+
+// --------------------------------------
+// 7. Mostrar info en la consola
+// --------------------------------------
+
+// Mostrar nombre del lote
+print('📍 Nombre del lote:', nombreLote);
+
+// Mostrar fecha seleccionada
+print('🗓️ Fecha de la imagen seleccionada:', fechaImagen);
+
+// Mostrar valores mínimos y máximos de NDVI
+var statsNDVI = ndvi.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: lote,
+  scale: 10,
+  maxPixels: 1e9
+});
+
+print('📊 Estadísticas NDVI:', statsNDVI);
+
+// --------------------------------------
+// 8. Calcular área por clase NDVI (bajo/medio/alto)
+// --------------------------------------
+
+// Cada pixel representa 10x10 = 100 m² = 0.01 ha
+var pixelArea = ee.Image.pixelArea().divide(10000);  // en hectáreas
+
+// Reclasificamos el NDVI en 3 clases: 1=bajo, 2=medio, 3=alto
+var ndviClasificado = ndvi.expression(
+  "(b('NDVI') < 0.33) ? 1" +
+  " : (b('NDVI') < 0.66) ? 2" +
+  " : 3"
+).rename('NDVI_Clasificado');
+
+// Multiplicamos el área por cada clase
+var areaPorClase = pixelArea.addBands(ndviClasificado).reduceRegion({
+  reducer: ee.Reducer.sum().group({
+    groupField: 1,
+    groupName: 'NDVI_clase',
+  }),
+  geometry: lote,
+  scale: 10,
+  maxPixels: 1e9
+});
+
+// Mostrar en consola
+print('📐 Área por clase de NDVI (en hectáreas):', areaPorClase);
+
+// --------------------------------------
+// 9. Histograma del NDVI
+// --------------------------------------
+
+var histograma = ui.Chart.image.histogram({
+  image: ndvi,
+  region: lote,
+  scale: 10,
+  minBucketWidth: 0.05
+})
+.setOptions({
+  title: 'Histograma NDVI',
+  hAxis: {title: 'NDVI'},
+  vAxis: {title: 'Frecuencia de píxeles'},
+  series: [{color: '#228B22'}]
+});
+
+print(histograma);
+
+
+// --------------------------------------
+// 10. Exportar si lo querés guardar
+// --------------------------------------
+Export.image.toDrive({
+  image: ndvi.clip(lote),
+  description: 'NDVI_' + nombreLote.replace(' ', '_') + '_' + fechaImagen.getInfo(),
+  scale: 10,
+  region: lote,
+  fileFormat: 'GeoTIFF'
+});
