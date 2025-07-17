@@ -1,0 +1,151 @@
+// --------------------------------------
+// 1. Lote y colección de imágenes
+// --------------------------------------
+var lote = Ferrara;
+var nombreLote = 'Ferrara';
+
+var s2 = ee.ImageCollection("COPERNICUS/S2")
+  .filterBounds(lote)
+  .filterDate("2024-12-01", "2025-04-30")
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20));
+
+// --------------------------------------
+// 2. Calcular NDVI para cada imagen
+// --------------------------------------
+var calcularNDVI = function(img) {
+  var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return img.addBands(ndvi);
+};
+
+var s2_con_ndvi = s2.map(calcularNDVI);
+
+// --------------------------------------
+// 3. Promediar NDVI por lote en cada fecha
+// --------------------------------------
+var ndvi_promedios = s2_con_ndvi.map(function(img) {
+  var ndvi = img.select('NDVI').reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: lote,
+    scale: 10,
+    maxPixels: 1e9
+  });
+  return ee.Feature(null, {
+    'NDVI': ndvi.get('NDVI'),
+    'fecha': img.date().format('YYYY-MM-dd')
+  });
+});
+
+// --------------------------------------
+// 4. Mostrar gráfico temporal
+// --------------------------------------
+var chart = ui.Chart.feature.byFeature(ndvi_promedios, 'fecha', 'NDVI')
+  .setChartType('LineChart')
+  .setOptions({
+    title: 'Evolución del NDVI promedio del lote',
+    hAxis: {title: 'Fecha'},
+    vAxis: {title: 'NDVI'},
+    lineWidth: 2,
+    pointSize: 4,
+    colors: ['green']
+  });
+
+print(chart);
+
+// --------------------------------------
+// 5. Encontrar imagen con NDVI promedio más alto
+// --------------------------------------
+var imagen_pico = s2_con_ndvi.map(function(img) {
+  var ndvi = img.select('NDVI').reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: lote,
+    scale: 10,
+    maxPixels: 1e9
+  });
+  return img.set('NDVI_medio', ndvi.get('NDVI'));
+}).sort('NDVI_medio', false).first();
+
+// Calcular NDVI y fecha
+var ndvi_pico = imagen_pico.normalizedDifference(['B8', 'B4']).rename('NDVI');
+var fecha_pico = ee.Date(imagen_pico.get('system:time_start')).format('YYYY-MM-dd');
+
+// --------------------------------------
+// 6. Visualización en el mapa
+// --------------------------------------
+Map.centerObject(lote, 13);
+
+// Capas: NDVI y RGB
+var visNDVI = {
+  min: 0,
+  max: 1,
+  palette: ['ff0000', 'ff6600', 'ffff00', 'a8e05f', '4c9b1d', '006400']
+};
+
+var visRGB = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 3000
+};
+
+Map.addLayer(imagen_pico.clip(lote), visRGB, 'RGB - ' + fecha_pico.getInfo());
+Map.addLayer(ndvi_pico.clip(lote), visNDVI, 'NDVI - ' + fecha_pico.getInfo());
+
+// --------------------------------------
+// 7. Leyenda visual NDVI
+// --------------------------------------
+var leyenda = ui.Panel({
+  style: {position: 'bottom-left', padding: '8px 15px'}
+});
+
+leyenda.add(ui.Label('NDVI', {
+  fontWeight: 'bold',
+  fontSize: '18px',
+  margin: '0 0 6px 0'
+}));
+
+var paleta = visNDVI.palette;
+var valores = ['0.0', '0.2', '0.4', '0.6', '0.8', '1.0'];
+
+for (var i = 0; i < paleta.length; i++) {
+  var colorBox = ui.Label('', {
+    backgroundColor: '#' + paleta[i],
+    padding: '8px',
+    margin: '0 4px 0 0'
+  });
+  var etiqueta = ui.Label(valores[i], { margin: '0 0 4px 0' });
+  leyenda.add(ui.Panel({
+    widgets: [colorBox, etiqueta],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  }));
+}
+
+Map.add(leyenda);
+
+// --------------------------------------
+// 8. Mostrar información en consola
+// --------------------------------------
+print('📍 Nombre del lote:', nombreLote);
+print('📅 Fecha del pico de NDVI promedio:', fecha_pico);
+
+// NDVI Min/Max
+var statsNDVI = ndvi_pico.reduceRegion({
+  reducer: ee.Reducer.minMax(),
+  geometry: lote,
+  scale: 10,
+  maxPixels: 1e9
+});
+
+print('📊 NDVI - Mínimo y Máximo:', statsNDVI);
+
+// --------------------------------------
+// 9. Exportar imagen NDVI del pico
+// --------------------------------------
+Export.image.toDrive({
+  image: ndvi_pico.clip(lote),
+  description: 'NDVI_pico_promedio',
+  folder: 'EarthEngine',
+  fileNamePrefix: 'NDVI_pico_' + fecha_pico.getInfo(),
+  region: lote,
+  scale: 10,
+  crs: 'EPSG:4326',
+  maxPixels: 1e13
+});
