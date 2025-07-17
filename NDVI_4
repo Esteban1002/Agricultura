@@ -1,0 +1,199 @@
+// --------------------------------------
+// 1. Lote y colección de imágenes
+// --------------------------------------
+var lote = Ghiglione;
+var nombreLote = 'Ghiglione';
+
+var fechaInicio = "2024-12-01";
+var fechaFin = "2025-04-30";
+
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+  .filterBounds(lote)
+  .filterDate(fechaInicio, fechaFin)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20));
+
+// --------------------------------------
+// 2. Calcular NDVI para cada imagen
+// --------------------------------------
+var calcularNDVI = function(img) {
+  var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  return img.addBands(ndvi)
+            .set('fecha', img.date().format('YYYY-MM-dd'));
+};
+
+var s2_con_ndvi = s2.map(calcularNDVI);
+
+// --------------------------------------
+// 3. Crear lista de fechas disponibles
+// --------------------------------------
+var listaFechas = s2_con_ndvi.aggregate_array('fecha');
+
+// --------------------------------------
+// 4. Interfaz para seleccionar fecha
+// --------------------------------------
+var leyendaPanel = null; // Panel global para la leyenda
+var imagenActual = null;
+var fechaActual = null;
+
+var selectorFecha = ui.Select({
+  items: listaFechas.getInfo(),
+  placeholder: 'Seleccioná una fecha',
+  onChange: function(fechaSeleccionada) {
+    var imagenSeleccionada = s2_con_ndvi.filter(ee.Filter.eq('fecha', fechaSeleccionada)).first();
+    mostrarImagen(imagenSeleccionada, fechaSeleccionada);
+  }
+});
+
+var panelControl = ui.Panel({
+  widgets: [
+    ui.Label('🗓 Selección de fecha NDVI', {fontWeight: 'bold', fontSize: '16px'}),
+    selectorFecha
+  ],
+  style: {position: 'top-right', padding: '8px'}
+});
+Map.add(panelControl);
+
+// --------------------------------------
+// 5. Panel de exportación manual
+// --------------------------------------
+var inputNombre = ui.Textbox({
+  placeholder: 'Nombre del archivo (opcional)',
+  style: {stretch: 'horizontal'}
+});
+
+var botonExportarNDVI = ui.Button({
+  label: '📤 Exportar NDVI',
+  onClick: function() {
+    if (!imagenActual || !fechaActual) return print('⚠️ Seleccioná una imagen primero.');
+    var nombre = inputNombre.getValue() || ('NDVI_' + fechaActual.replace(/-/g, '_'));
+    var ndvi = imagenActual.select('NDVI')
+      .set({'Lote': nombreLote, 'Fecha': fechaActual});
+    Export.image.toDrive({
+      image: ndvi.clip(lote),
+      description: nombre,
+      folder: 'EarthEngine',
+      fileNamePrefix: nombre,
+      region: lote,
+      scale: 10,
+      crs: 'EPSG:4326',
+      maxPixels: 1e13
+    });
+    print('✅ Exportación NDVI lanzada con nombre:', nombre);
+  }
+});
+
+var botonExportarRGB = ui.Button({
+  label: '📤 Exportar RGB',
+  onClick: function() {
+    if (!imagenActual || !fechaActual) return print('⚠️ Seleccioná una imagen primero.');
+    var nombre = inputNombre.getValue() || ('RGB_' + fechaActual.replace(/-/g, '_'));
+    var rgb = imagenActual.select(['B4', 'B3', 'B2'])
+      .set({'Lote': nombreLote, 'Fecha': fechaActual});
+    Export.image.toDrive({
+      image: rgb.clip(lote),
+      description: nombre,
+      folder: 'EarthEngine',
+      fileNamePrefix: nombre,
+      region: lote,
+      scale: 10,
+      crs: 'EPSG:4326',
+      maxPixels: 1e13
+    });
+    print('✅ Exportación RGB lanzada con nombre:', nombre);
+  }
+});
+
+var panelExportacion = ui.Panel({
+  widgets: [
+    ui.Label('💾 Exportación manual', {fontWeight: 'bold', fontSize: '16px'}),
+    inputNombre,
+    botonExportarNDVI,
+    botonExportarRGB
+  ],
+  style: {position: 'top-right', padding: '8px', margin: '90px 0 0 0'} // debajo del selector
+});
+Map.add(panelExportacion);
+
+// --------------------------------------
+// 6. Función para mostrar imagen RGB y NDVI
+// --------------------------------------
+function mostrarImagen(imagen, fecha) {
+  Map.layers().reset(); // Borra capas anteriores
+  Map.centerObject(lote, 13);
+
+  var ndvi = imagen.select('NDVI');
+  var rgb = imagen.select(['B4', 'B3', 'B2']);
+
+  // Calcular percentiles 10 y 95 para NDVI
+  var percentiles = ndvi.reduceRegion({
+    reducer: ee.Reducer.percentile([10, 95]),
+    geometry: lote,
+    scale: 10,
+    maxPixels: 1e9
+  });
+
+  var minVis = ee.Number(percentiles.get('NDVI_p10'));
+  var maxVis = ee.Number(percentiles.get('NDVI_p95'));
+
+  var visNDVI = {
+    min: minVis.getInfo(),
+    max: maxVis.getInfo(),
+    palette: ['ff0000', 'ff6600', 'ffff00', 'a8e05f', '4c9b1d', '006400']
+  };
+
+  var visRGB = {
+    min: 0,
+    max: 3000,
+    bands: ['B4', 'B3', 'B2']
+  };
+
+  Map.addLayer(rgb.clip(lote), visRGB, 'RGB - ' + fecha);
+  Map.addLayer(ndvi.clip(lote), visNDVI, 'NDVI - ' + fecha);
+
+  // Información en consola
+  print('📅 Imagen seleccionada:', fecha);
+  print('📊 NDVI (P10-P95):', minVis, maxVis);
+
+  // Mostrar leyenda única
+  mostrarLeyenda(visNDVI.palette);
+
+  // Guardar imagen y fecha activa para exportación
+  imagenActual = imagen;
+  fechaActual = fecha;
+}
+
+// --------------------------------------
+// 7. Función para mostrar leyenda (una sola vez)
+// --------------------------------------
+function mostrarLeyenda(paleta) {
+  if (leyendaPanel) {
+    Map.remove(leyendaPanel); // Elimina leyenda anterior si existe
+  }
+
+  leyendaPanel = ui.Panel({
+    style: {position: 'bottom-left', padding: '8px 15px'}
+  });
+
+  leyendaPanel.add(ui.Label('NDVI', {
+    fontWeight: 'bold',
+    fontSize: '18px',
+    margin: '0 0 6px 0'
+  }));
+
+  var valores = ['0.0', '0.2', '0.4', '0.6', '0.8', '1.0'];
+
+  for (var i = 0; i < paleta.length; i++) {
+    var colorBox = ui.Label('', {
+      backgroundColor: '#' + paleta[i],
+      padding: '8px',
+      margin: '0 4px 0 0'
+    });
+    var etiqueta = ui.Label(valores[i], { margin: '0 0 4px 0' });
+    leyendaPanel.add(ui.Panel({
+      widgets: [colorBox, etiqueta],
+      layout: ui.Panel.Layout.Flow('horizontal')
+    }));
+  }
+
+  Map.add(leyendaPanel);
+}
