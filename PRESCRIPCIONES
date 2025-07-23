@@ -1,0 +1,239 @@
+// --------------------------------------
+// 1. Definir lote y parámetros
+// --------------------------------------
+var lote = Ghiglione;  // reemplazá por tu geometría real
+Map.centerObject(lote, 13);
+
+var fechaInicio = ee.Date('2010-10-01');
+var fechaFin = ee.Date('2025-04-30');
+var nombreLote = 'Ghiglione';
+
+// --------------------------------------
+// 2. Cargar Sentinel-2, calcular NDVI y filtrar
+// --------------------------------------
+var coleccion = ee.ImageCollection("COPERNICUS/S2_SR_HARMONIZED")
+  .filterBounds(lote)
+  .filterDate(fechaInicio, fechaFin)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 20))
+  .map(function(img) {
+    var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+    // Calcular percentiles p10 y p95 para enmascarar valores extremos
+    var percentiles = ndvi.reduceRegion({
+      reducer: ee.Reducer.percentile([10, 95]),
+      geometry: lote,
+      scale: 10,
+      maxPixels: 1e9
+    });
+    var p10 = percentiles.getNumber('NDVI_p10');
+    var p95 = percentiles.getNumber('NDVI_p95');
+    ndvi = ndvi.updateMask(ndvi.gte(p10).and(ndvi.lte(p95)));
+    return img.addBands(ndvi).set('año', img.date().get('year'));
+  });
+
+// --------------------------------------
+// 3. NDVI promedio por año
+// --------------------------------------
+var años = ee.List.sequence(2010, 2025);
+var ndviPorAño = años.map(function(año) {
+  var imgPorAño = coleccion
+    .filter(ee.Filter.eq('año', año))
+    .select('NDVI')
+    .mean()
+    .set('año', año);
+  return imgPorAño;
+});
+var coleccionNDVI = ee.ImageCollection(ndviPorAño);
+
+// --------------------------------------
+// 4. Crear panel con barra deslizadora y tamaño compacto
+// --------------------------------------
+var añosLista = años.getInfo();
+var maxAños = 15;  // mostrará más años, se podrá hacer scroll
+var añosParaMostrar = añosLista.slice(-maxAños);
+
+// Panel interno vertical con checkboxes
+var panelCheckboxes = ui.Panel({
+  layout: ui.Panel.Layout.flow('vertical')
+});
+
+var checkboxes = [];
+añosParaMostrar.forEach(function(anio) {
+  var cb = ui.Checkbox({
+    label: anio.toString(),
+    value: false,
+    onChange: actualizarNDVI,
+    style: {margin: '0 0 2px 0'}  // margen pequeño
+  });
+  checkboxes.push(cb);
+  panelCheckboxes.add(cb);
+});
+
+// Panel contenedor con altura fija (scroll vertical forzado)
+var contenedorScroll = ui.Panel({
+  widgets: [panelCheckboxes],
+  layout: ui.Panel.Layout.flow('vertical'),
+  style: {
+    height: '100px',  // achicás el tamaño visible
+    width: '180px',
+    backgroundColor: 'white',
+    border: '1px solid lightgray',
+    padding: '4px',
+    // ⚠️ Este es el truco: aunque no esté documentado, GEE lo acepta
+    shown: true
+  }
+});
+
+// Panel externo con título + scroll embebido
+var checkboxPanel = ui.Panel({
+  widgets: [
+    ui.Label('Seleccioná años:', {
+      fontWeight: 'bold',
+      fontSize: '12px',
+      margin: '0 0 4px 0'
+    }),
+    contenedorScroll
+  ],
+  style: {
+    position: 'top-right',
+    width: '200px',
+    padding: '8px',
+    backgroundColor: 'white',
+    border: '1px solid gray'
+  }
+});
+
+Map.add(checkboxPanel);
+
+// --------------------------------------
+// 5. Panel para exportación
+// --------------------------------------
+var inputNombre = ui.Textbox({
+  placeholder: 'Nombre archivo exportación',
+  style: {stretch: 'horizontal', margin: '8px 0'}
+});
+
+var botonExportar = ui.Button({
+  label: '📤 Exportar Prescripción SHP',
+  onClick: function() {
+    if (!imagenExportacion) {
+      print('⚠️ Seleccioná al menos un año para exportar.');
+      return;
+    }
+    var zonas = imagenExportacion.reduceToVectors({
+      geometry: lote,
+      scale: 10,
+      geometryType: 'polygon',
+      labelProperty: 'clase',
+      reducer: ee.Reducer.mode(),
+      maxPixels: 1e13
+    });
+
+    var nombre = inputNombre.getValue() || 'Prescripcion_NDVI';
+    Export.table.toDrive({
+      collection: zonas,
+      description: nombre,
+      fileNamePrefix: nombre,
+      fileFormat: 'SHP'
+    });
+    print('✅ Exportación iniciada con nombre:', nombre);
+  }
+});
+
+var panelExportar = ui.Panel({
+  widgets: [
+    ui.Label('💾 Exportación Prescripción', {fontWeight: 'bold', fontSize: '16px'}),
+    inputNombre,
+    botonExportar
+  ],
+  style: {position: 'top-right', margin: '150px 20px 0 0', padding: '8px', width: '200px', backgroundColor: 'white', border: '1px solid gray'}
+});
+Map.add(panelExportar);
+
+// --------------------------------------
+// 6. Leyenda NDVI
+// --------------------------------------
+var leyendaPanel = null;
+function mostrarLeyenda(paleta) {
+  if (leyendaPanel) Map.remove(leyendaPanel);
+
+  leyendaPanel = ui.Panel({
+    style: {position: 'bottom-left', padding: '8px 15px', backgroundColor: 'white', border: '1px solid gray'}
+  });
+
+  leyendaPanel.add(ui.Label('NDVI promedio', {
+    fontWeight: 'bold',
+    fontSize: '16px',
+    margin: '0 0 6px 0'
+  }));
+
+  var valores = ['0.0', '0.2', '0.4', '0.6', '0.8', '1.0'];
+  for (var i = 0; i < paleta.length; i++) {
+    var colorBox = ui.Label('', {
+      backgroundColor: '#' + paleta[i],
+      padding: '8px',
+      margin: '0 4px 0 0'
+    });
+    var etiqueta = ui.Label(valores[i], { margin: '0 0 4px 0' });
+    leyendaPanel.add(ui.Panel({
+      widgets: [colorBox, etiqueta],
+      layout: ui.Panel.Layout.Flow('horizontal')
+    }));
+  }
+  Map.add(leyendaPanel);
+}
+
+// --------------------------------------
+// 7. Función para actualizar visualización NDVI según años seleccionados
+// --------------------------------------
+var imagenActual = null;
+var imagenExportacion = null;
+
+function actualizarNDVI() {
+  Map.layers().reset();
+  if (leyendaPanel) Map.remove(leyendaPanel);
+
+  var seleccionados = checkboxes.filter(function(cb) {
+    return cb.getValue();
+  }).map(function(cb) {
+    return parseInt(cb.getLabel());
+  });
+
+  if (seleccionados.length === 0) {
+    imagenActual = null;
+    imagenExportacion = null;
+    return;
+  }
+
+  var imagenesSeleccionadas = coleccionNDVI.filter(ee.Filter.inList('año', seleccionados));
+  var promedio = imagenesSeleccionadas.mean().clip(lote);
+  imagenActual = promedio;
+
+  var stats = promedio.reduceRegion({
+    reducer: ee.Reducer.percentile([10, 50, 90]),
+    geometry: lote,
+    scale: 10,
+    maxPixels: 1e13
+  });
+
+  stats.evaluate(function(p) {
+    var p10 = ee.Number(p['NDVI_p10']);
+var p50 = ee.Number(p['NDVI_p50']);
+var p90 = ee.Number(p['NDVI_p90']);
+
+var visParams = {
+  min: p10.getInfo(),
+  max: p90.getInfo(),
+  palette: ['ff0000', 'ff6600', 'ffff00', 'a8e05f', '4c9b1d', '006400']
+};
+Map.addLayer(promedio, visParams, 'NDVI Promedio Seleccionado');
+mostrarLeyenda(visParams.palette);
+
+var clasificado = promedio
+  .where(promedio.lte(p10), 1)
+  .where(promedio.gt(p10).and(promedio.lte(p50)), 2)
+  .where(promedio.gt(p50), 3)
+  .rename('clase');
+imagenExportacion = clasificado.clip(lote);
+
+  });
+}
